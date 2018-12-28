@@ -1,63 +1,81 @@
 /*
-        CatchPilot by tourdion
+        CatchPilot
+
+        Copyright (C) 2018 Martin Bettermann <catchpilot.de@gmail.com>
 
         https://github.com/tourdion/CatchPilot
 
-        Version beta 0.2   Stand 22.01.2018
+        Version beta 0.3   Stand 28.12.2018
 
         catchpilot.de@gmail.com
 
         GNU General Public License v3.0
 
+        This program is free software: you can redistribute it and/or modify
+        it under the terms of the GNU General Public License as published by
+        the Free Software Foundation, either version 3 of the License, or
+        (at your option) any later version.
+
+        This program is distributed in the hope that it will be useful,
+        but WITHOUT ANY WARRANTY; without even the implied warranty of
+        MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+        GNU General Public License for more details.
+
+        You should have received a copy of the GNU General Public License
+        along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 */
 
-#include <RTClib.h>
-#include <SoftwareSerial.h>;
-#include <LiquidCrystal_I2C.h>
+#include <string.h>
+#include <RTClib.h>             // Batteriegepuffertes Uhrenmodul
+#include <SoftwareSerial.h>     // zusätzliche serielle Schnittstelle
+#include <Adafruit_SSD1306.h>   // OLED-Display
+#include <avr/wdt.h>            // WatchDog Timer
 
-// #####   Achtung, bei SIM800L Modul: 4,2V nicht 5V, das Modul kann zerstört werden! Zehner-Diode verwenden.
-// #####   Prinzipiell ist jedes GSM Modul verwendbar, da nur mit AT-Befehlen gearbeited wird
-// #####   SIM_TX  an  D8
-// #####   SIM_RX  an  D7
-
-// #####    I2C: SCL an A5 (gelb);    SDA an A4  (orange)
-// Set the pins on the I2C chip used for LCD connections:
-//                    addr, en,rw,rs,d4,d5,d6,d7,bl,blpol
-LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);
+// ###   I2C: SCL an A5;    SDA an A4
+#define OLED_RESET 4 // not used / nicht genutzt bei diesem Display
+Adafruit_SSD1306 display(OLED_RESET);
 
 RTC_DS1307 RTC;  // Adress of ClockModule is 0x68
 
-// SMS an diese Nummer
-char Telefonnummer[30] = "AT+CMGS=\"017xxxxxxxxx\"\r";
-
-char Nachricht[160];
-char Datum[11];
-char Uhrzeit[12];
-char Fangzeit[9];
-
-int Fang = 0;         // #####  Fangkontakt an D5 und VCC 5V
-int ReedKontakt = 5;  // #####  1kOhm zwischen GND und D5
-
-int SchalterSMS = 2;  // #####  Schiebeschalter an D2 und VCC 5V
-int SMSStatus = 0;    // #####  1kOhm zwischen GND und D2
-
-char Empfang[15];
-char Guthaben[50];
-char Netz[25];
-
-byte x;
-byte i;
-int FehlerCheck;
-char y[4];
-
-char Akku[12];
-float Volt;
-
-//Create software serial object to communicate with SIM800
+//Create software serial object to communicate with GSM-Module
 #define GSM_TX_PIN 8
 #define GSM_RX_PIN 7
 SoftwareSerial serialGSM(GSM_TX_PIN, GSM_RX_PIN);
 
+// SMS an diese Nummer
+char Telefonnummer[25] = "AT+CMGS=\"017xxxxxxxx\"\r";
+
+/*  Fangkontakt an D5 und VCC 5V
+    1kOhm zwischen GND und D5
+*/
+byte ReedKontakt = 5;
+bool Fang = false;
+
+/*  SMS ja oder nein
+    Schiebeschalter an D2 und VCC 5V
+    1kOhm zwischen GND und D2
+*/
+byte SchalterSMS = 2;
+bool StatusSMS = false;
+
+/*  Batteriespannung messen an Pin A0 über Spannungsteiler
+     100K Poti zwischen 5V und Gnd, Mitte an A0
+*/
+char Akku[3];
+
+byte x;
+byte i;
+int FehlerCheck;
+int BAUDRATE = 19200;
+
+char Nachricht[30];
+char Uhrzeit[7];
+char Fangzeit[7];
+char y[4];
+
+
+// #### Subroutine um serialGSM-Abfragen in String umzuwandeln
 #define ZEILENTRENNZEICHEN 13   // 13 ist Steuerzeichen CR (Carriage Return)
 char* receiveBuffer() {
   static char lineBuffer[40];
@@ -79,6 +97,10 @@ char* receiveBuffer() {
   return NULL;
 }     //  Ende  receiveBuffer()
 
+/* Subroutine um Statusmeldungen zur GSM-Verbindung abzurufen
+   Die Werte für die String-Bearbeitung funktionieren mit dem ALDITalk (E-Plus)-Netz
+   und müssen für andere Netze ggf. angepasst werden.
+*/
 void getStatusGSM() {
   while (!serialGSM);
   serialGSM.println("at+csq");                   // Empfangsstärke
@@ -86,184 +108,88 @@ void getStatusGSM() {
   serialGSM.println("at+cops?");                 // Netz
   i = 1;
   FehlerCheck = 1;
+  char Store[10];
   do
   {
     char* text = receiveBuffer();
     if (text != NULL) {
       if ( !strncmp (text, "+CSQ", 4 )) {
-        strcpy(Empfang, text);
+        strcpy(Store, text + 6);
+        strncpy(Nachricht, Store, 2);
+        strcat(Nachricht, " ");
         i++;
       }
       if ( !strncmp (text, "+COPS", 5 )) {
-        strcpy(Netz, text);
+        strcpy(Store, text + 12);
+        strncat(Nachricht, Store, 6);
+        strcat(Nachricht, " ");
         i++;
       }
       if ( !strncmp (text, "+CUSD", 5 )) {
-        strcpy(Guthaben, text);
+        strcpy(Store, text + 32);
+        strncat(Nachricht, Store, 5);
+        strcat(Nachricht, "Euro ");
         i++;
       }
     }
     FehlerCheck++;
-  } while (i < 4 || FehlerCheck > 1500 );  //Abbruch nach zu langer Wartezeit
+  } while (i < 4 || FehlerCheck > 2000 );  //Abbruch wenn zu lange Wartezeit
   return;
 }   // Ende getStatusGSM()
 
-void getAkkuStatus() {   // ##### Batteriestatus     Messleitung an A0
-  Volt = analogRead(A0) / 810.0 * 12.38;
-  char Spannung[5] = "";
-  memset(Akku, 0, sizeof(Akku));
-  dtostrf(Volt, 4, 2, Spannung);
-  strcat(Akku, "Akku ");
-  strcat(Akku, Spannung);
-  strcat(Akku, " V");
-  return;
-}
-
-void togglePower() {
-  // schaltet das SIM900 Shield ein
-  digitalWrite(9, HIGH);
-  delay(1000);
-  digitalWrite(9, LOW);
-  delay(5000);
-  Serial.println("Power on/off");
-  return;
-}
-
-int SerialSpeed = 19200;
 
 void setup() {
 
-  pinMode(ReedKontakt, INPUT);
-  pinMode(SMSStatus, INPUT);    //  SMS senden/sperren
-  pinMode(A0, INPUT);           //  Akku über Spannungsteiler
+  wdt_enable(WDTO_8S); // Start des AVR-Watchdog
 
   RTC.begin();
-  RTC.adjust(DateTime(__DATE__, __TIME__));
+  RTC.adjust(DateTime(__DATE__, __TIME__));    // Uhr stellen
 
-  lcd.begin(20, 4);
-  lcd.backlight();
-  lcd.print("CatchPilot");
-  delay(300);
+  // OLED Display mit I2C-Adresse 0x3c initialisieren
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.clearDisplay();
+  display.display();
 
+  pinMode(ReedKontakt, INPUT);
+  pinMode(SchalterSMS, INPUT);
+  pinMode(A0, INPUT);
 
+  display.setTextColor(WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print("CatchPilot");
+  display.setTextSize(1);
 
-  // togglePower();  // Shield einschalten
-
-  Serial.begin(SerialSpeed);
-
-  while (!Serial);
-  Serial.println("Catch Pilot");
+  serialGSM.begin(BAUDRATE);
+  while (!serialGSM);
+  
+  memset(Nachricht, 0, sizeof(Nachricht));
+  getStatusGSM();
+  display.setCursor(0, 21);
+  display.print(Nachricht);
+  Serial.println(Nachricht);
   Serial.println();
 
-  Serial.println("Serial bereit");
+  display.display();
+  delay(3500);
 
-  serialGSM.begin(SerialSpeed);
-  while (!serialGSM);
-  Serial.println("GSM bereit");
-
-  serialGSM.println("AT+IPR=19200");  // AT Befehl zum setzen der Geschwindigkeit
-
-  lcd.clear();
 }
 
 void loop() {
 
-  getAkkuStatus();
-  lcd.setCursor(9, 1);
-  lcd.print(Akku);
-  delay(50);
+  display.clearDisplay();
 
-  SMSStatus = digitalRead(SchalterSMS);
-  if ( SMSStatus == 1) {
-    lcd.setCursor(0, 1);
-    lcd.print("SMS on ");
-  }
-  else {
-    lcd.setCursor(0, 1);
-    lcd.print("SMS off");
-  }
+  // ####  Tägliche Statusmeldungen
 
-  DateTime now = RTC.now();
-
-  // Datum
-  memset(Datum, 0, sizeof(Datum));
-  x = now.day();
-  itoa(x, y, 10);
-  if (x < 10)  {
-    strcat (Datum, "0");
-  }
-  strcat (Datum, y);
-  strcat (Datum, ".");
-  x = now.month();
-  itoa(x, y, 10);
-  if (x < 10)  {
-    strcat (Datum, "0");
-  }
-  strcat (Datum, y);
-  strcat (Datum, ".");
-  x = now.year();
-  itoa(x, y, 10);
-  strcat (Datum, y);
-
-  lcd.setCursor(10, 0);
-  lcd.print(Datum);
-
-  //  Uhrzeit
-
-  memset(Uhrzeit, 0, sizeof(Uhrzeit));
-  x = now.hour();
-  itoa(x, y, 10);
-  if (x < 10)  {
-    strcat (Uhrzeit, "0");
-  }
-  strcat (Uhrzeit, y);
-
-  strcat (Uhrzeit, ":");
-
-  x = now.minute();
-  itoa(x, y, 10);
-  if (x < 10)  {
-    strcat (Uhrzeit, "0");
-  }
-  strcat (Uhrzeit, y);
-
-  strcat (Uhrzeit, ":");
-
-  x = now.second();
-  itoa(x, y, 10);
-  if (x < 10)  {
-    strcat (Uhrzeit, "0");
-  }
-  strcat (Uhrzeit, y);
-
-
-  lcd.setCursor(0, 0);
-  lcd.print(Uhrzeit);
-
-  // ####  Tägliche Statusmeldungen  #########################
-
-  if ( !strncmp ( Uhrzeit, "09:00:00", 8 ) || !strncmp ( Uhrzeit, "20:00:00", 8 )) {
-    memset(Nachricht, 0, sizeof(Nachricht));  // löscht Nachricht
+  if ( !strncmp ( Uhrzeit, "09:00:00", 8 ) || !strncmp ( Uhrzeit, "21:00:00", 8 )) {
+    memset(Nachricht, 0, sizeof(Nachricht));
     getStatusGSM();
-    strcpy(Nachricht, "Statusmeldung ");
-    strcat(Nachricht, Uhrzeit);
-    strcat(Nachricht, " : ");
-    strcat(Nachricht, Akku);
-    strcat(Nachricht, " : Empfang ");
-    strcat(Nachricht, Empfang);
-    strcat(Nachricht, " : Netz ");
-    strcat(Nachricht, Netz);
-    strcat(Nachricht, " : Guthaben ");
-    strcat(Nachricht, Guthaben);
-    strcat(Nachricht, " : Falle bereit");
-    Serial.println(Telefonnummer);
+    strncat(Nachricht, Uhrzeit, 5);
+    strcat(Nachricht, " Bat");
+    strncat(Nachricht, Akku, 4);
+    strcat(Nachricht, "V");
     Serial.println(Nachricht);
-    Serial.println();
-    lcd.setCursor(0, 2);
-    lcd.print("StatusSMS: ");
-    lcd.print(Uhrzeit);
-
-    if ( SMSStatus == 1 && FehlerCheck < 1500 ) {    // ###### Senden der SMS
+    if ( StatusSMS == true ) {    // ###### Senden der SMS
       serialGSM.println("AT+CMGF=1");
       delay(1000);
       serialGSM.print(Telefonnummer);
@@ -273,36 +199,72 @@ void loop() {
       serialGSM.println((char)26);
       delay(1000);
     }
-    delay(1000);
   }
 
+  // #### SMS an oder aus
 
-  // Abfrage Reed-Kontakt
-  int FangStatus = digitalRead(ReedKontakt);
-
-  if (FangStatus == 1)  {
-    lcd.setCursor(0, 3);
-    lcd.print("Falle bereit     ");
-    Fang = 0;
+  if ( digitalRead(SchalterSMS) == 1) {
+    StatusSMS = true;
+    display.setCursor(80, 0);
+    display.print("SMS on ");
+  }
+  else {
+    StatusSMS = false;
+    display.setCursor(80, 0);
+    display.print("SMS off");
   }
 
+  // #### Akku-Spannung abrufen (an Pin A0)
+  dtostrf((analogRead(A0) / 810.0 * 12.38), 4, 1, Akku);
+  display.setCursor(0, 12);
+  display.print("Akku ");
+  display.print(Akku);
+  display.print("V");
+  delay(20);
+
+  // ####  Uhrzeit
+  DateTime now = RTC.now();
+  memset(Uhrzeit, 0, sizeof(Uhrzeit));
+  x = now.hour();
+  itoa(x, y, 10);
+  if (x < 10)  {
+    strcat (Uhrzeit, "0");
+  }
+  strcat (Uhrzeit, y);
+  strcat (Uhrzeit, ":");
+  x = now.minute();
+  itoa(x, y, 10);
+  if (x < 10)  {
+    strcat (Uhrzeit, "0");
+  }
+  strcat (Uhrzeit, y);
+  strcat (Uhrzeit, ":");
+  x = now.second();
+  itoa(x, y, 10);
+  if (x < 10)  {
+    strcat (Uhrzeit, "0");
+  }
+  strcat (Uhrzeit, y);
+
+  display.setCursor(0, 0);
+  display.print(Uhrzeit);
+
+  // ####   Abfrage Reed-Kontakt
+  if (digitalRead(ReedKontakt) == 1)  {
+    Fang = false;
+    display.setCursor(0, 24);
+    display.print("Falle bereit");
+  }
   else  {
-    lcd.setCursor(0, 3);
-    lcd.print("Fang um ");
-    lcd.print(Fangzeit);
-    if ( Fang == 0 ) {
-      memcpy (Fangzeit, Uhrzeit, 9);
-      memset(Nachricht, 0, sizeof(Nachricht));
-      strcpy(Nachricht, "Falle ausgeloest um ");
-      strcat(Nachricht, Fangzeit);
-      strcat(Nachricht, " : ");
-      strcat(Nachricht, Akku);
-      Serial.print(Telefonnummer);
-      Serial.print(" : ");
-      Serial.print(Nachricht);
-      Serial.println();
-      Fang = 1;  // Verriegelung bis Falle wieder bereit
-      if ( SMSStatus == 1 ) {    // ###### Senden der SMS
+    display.setCursor(0, 24);
+    display.print("Fang um ");
+    display.print(Fangzeit);
+    if ( Fang == false ) {
+      strncpy(Fangzeit, Uhrzeit, 5);
+      strcpy(Nachricht, "Fang um ");
+      strncat(Nachricht, Fangzeit, 5);
+      Fang = true;  // Verriegelung bis Falle wieder bereit
+      if ( StatusSMS == true ) {    // ###### Senden der SMS
         serialGSM.println("AT+CMGF=1");
         delay(1000);
         serialGSM.print(Telefonnummer);
@@ -315,5 +277,8 @@ void loop() {
     }
   }
 
+  display.display();
+
+  wdt_reset(); // WatchDog Timer Reset
 
 }
